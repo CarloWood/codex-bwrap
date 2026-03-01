@@ -1,4 +1,6 @@
-openai-codex
-openai-codex.git
+openai-codex/
+openai-codex.git/
+AAP/
 .cargo
-ncat
+sockettapd.log
+ncat/

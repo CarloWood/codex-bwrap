@@ -1,7 +1,8 @@
 # This file must be sourced (with the full environment, including aliases, intact).
 # Use the alias `codex` to use it.
 
-pre_path "/home/carlo/projects/aicxx/sockettapd/build/src"
+# Run sockettapd from its project directory.
+pre_path "/home/carlo/projects/aicxx/codex-sockettapd/build/src"
 
 # Sanity checks.
 if [ -z "$PROJECTDIR" ]; then
