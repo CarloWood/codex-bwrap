@@ -1,0 +1,70 @@
+diff --cc PKGBUILD
+index 5695a50,cbee5c9..0000000
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@@ -1,37 -1,39 +1,43 @@@
+  # Maintainer: Giovanni Harting <anonfunc@archlinux.org>
+ +# Maintainer: Orhun Parmaksız <orhun@archlinux.org>
+  # Contributor: Christopher Cooper <christopher@cg505.com>
+  
+- pkgname=openai-codex
+- pkgver=0.106.0
++ pkgname=openai-codex-run
++ pkgver=r3739.c955757
+  pkgrel=1
+  pkgdesc='OpenAIs lightweight coding agent that runs in your terminal'
+  arch=(x86_64)
+- url='https://github.com/openai/codex'
++ url='file:///usr/src/projects_github/codex/openai-codex.git#branch=master'
+  license=(Apache-2.0)
+  depends=(
+ -  openssl
+ -  gcc-libs
+ +  bzip2
+    glibc
+ +  libcap
+ +  libgcc
+ +  openssl
+ +  xz
+ +  zlib
+  )
++ conflicts=('openai-codex' 'openai-codex-debug')
+  makedepends=(cargo)
+ -checkdepends=(cargo-nextest git)
+ +checkdepends=(cargo-nextest git clang cmake dotslash)
+  optdepends=(
+    'git: allow for repository actions'
+    'ripgrep: accelerated large-repo search'
+  )
+  options=('!lto')
+- source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/rust-v$pkgver.tar.gz")
+- b2sums=('448fff4f75517270f6adc9bdcbd3b912bc7e08434145637cb85ed09dc39f24abbc8f5ac6d7660ccac65a4af112f4bf4018501e309d4b4ceff9f6d6920543144f')
++ source=("$pkgname::git+$url")
++ b2sums=('SKIP')
++ 
++ pkgver() {
++   cd "$pkgname"
++   printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
++ }
+  
+  prepare() {
+-   cd codex-rust-v$pkgver/codex-rs
++   cd openai-codex/codex-rs
+  
+ -  export RUSTUP_TOOLCHAIN=stable
+ -  cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+ +  cargo fetch --target "$(rustc --print host-tuple)"
+  }
+  
+  build() {
+@@@ -41,8 -47,9 +51,8 @@@
+  }
+  
+  check() {
+-   cd codex-rust-v$pkgver/codex-rs
++   cd openai-codex-run/codex-rs
+  
+ -  export RUSTUP_TOOLCHAIN=stable
+    cargo nextest run --all-features --no-fail-fast -- \
+      --skip 'suite::user_agent::get_user_agent_returns_current_codex_user_agent' \
+      --skip 'suite::send_message::test_send_message_raw_notifications_opt_in' \

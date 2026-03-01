@@ -1,0 +1,24 @@
+openai-codex.git/
+
+  fork of openai/codex
+  Make changes here, then push to github.
+
+Running `codex` in this directory will allow Codex to work on the openai-codex.git repository.
+
+openai-codex/
+
+  source tree with PKGBUILD, downloaded with:
+
+    pkgctl repo clone --protocol=https openai-codex
+
+  PKGBUILD was changed; see PKGBUILD.diff
+
+To (re)compile, run `makepkg -si` in openai-codex/.
+
+Alternatively, have
+
+daniel:~/projects/github/codex/openai-codex/src>ls -l
+total 4
+lrwxrwxrwx 1 carlo carlo 22 Dec 19 18:12 openai-codex -> ../../openai-codex.git
+
+and run `makepkg --noextract --noprepare --nocheck --install`.

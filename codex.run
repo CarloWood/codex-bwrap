@@ -1,0 +1,414 @@
+# This file must be sourced (with the full environment, including aliases, intact).
+# Use the alias `codex` to use it.
+
+pre_path "/home/carlo/projects/aicxx/sockettapd/build/src"
+
+# Sanity checks.
+if [ -z "$PROJECTDIR" ]; then
+  echo "Error: PROJECTDIR not set."
+  exit 1
+fi
+if [ -z "$CODEX_WORKSPACE" ]; then
+  echo "Error: CODEX_WORKSPACE not set."
+  exit 1
+fi
+if [ -z "$CODEX_REPOBASE" ]; then
+  echo "Error: CODEX_REPOBASE not set."
+  exit 1
+fi
+if [ "$REPOROOT" != "$CODEX_WORKSPACE/$CODEX_REPOBASE" ]; then
+  echo "Error: REPOROOT != CODEX_WORKSPACE/CODEX_REPOBASE";
+  exit 1
+fi
+if [ -z "$CCACHE_DIR" ]; then
+  echo "Error: CCACHE_DIR not set."
+  exit 1
+fi
+if [[ $(type -t pe) != "function" ]]; then
+  echo "Error: no such function: pe"
+  exit 1
+fi
+if [[ ! -f "$CDEH_TMP/env.base" ]]; then
+  echo "Error: $CDEH_TMP/env.base does not exist?!"
+  exit 1
+fi
+if [[ ! -d "/run/remountd" ]]; then
+  echo "Error: /run/remountd does not exist. Run `systemctl enable --now remountd.socket`."
+  exit 1
+fi
+
+function __cdeh_restore_host_environment() {
+  # Store the base environment to $CODEX_WORKSPACE/env.base.
+  cp "$CDEH_TMP/env.base" "$HOME_CODEX/cdeh/env.base" 
+  # Accumulate env.source files on top of this base that are not part of the bwrap environment (aka, CODEX_WORKSPACE).
+  echo "# Host env.source files not part of this container." > "$HOME_CODEX/env.source"
+  # This is the same as the first part of `resource`. It builds CDEH_ENVFILES.
+  __cdeh_rebuild_source_dirs
+  rm -f "$CDEH_TMP/envfiles"
+  __cdeh_rebuild_envfiles
+  local cdeh_envfiles=$(cat "$CDEH_TMP/envfiles")
+  # Finally do the same thing as the part of resource: __cdeh_resource, but without actually sourcing or reset our own environment.
+  local codex_workspace_realpath=$(realpath "$CODEX_WORKSPACE")
+  local CDEH_SAVE_IFS="$IFS"
+  IFS='
+  ';
+  local nr=0
+  for __cdeh_env_file in $cdeh_envfiles;
+  do
+    if test "$__cdeh_env_file" != "__cdeh_reset_environment"; then
+      local cdeh_env_file_realpath=$(realpath $__cdeh_env_file)
+      if [[ "$cdeh_env_file_realpath" == "$codex_workspace_realpath"* ]]; then
+        break
+      fi
+      cp "$__cdeh_env_file" "$HOME_CODEX/cdeh/env.host$nr"
+      echo "source \"\$CDEH_ROOT/env.host$nr\"" >> "$HOME_CODEX/env.source"
+      nr=$((nr + 1))
+    fi
+  done
+  echo "export DISPLAY=$CODEX_DISPLAY" >> "$HOME_CODEX/env.source"
+  echo "export XAUTHORITY=$CODEX_XAUTHORITY" >> "$HOME_CODEX/env.source"
+  IFS="$CDEH_SAVE_IFS"
+  if [ -f "$TOPPROJECT/env.compiler" ]; then
+    if [[ $TOPPROJECT != $CODEX_WORKSPACE ]]; then
+      cp "$TOPPROJECT/env.compiler" "$CODEX_WORKSPACE"
+    fi
+  fi
+}
+
+# Included in the 'host' environement.
+HOST_XAUTHORITY="$HOME/.Xauthority-xephyr"
+CODEX_XAUTHORITY="$HOME_CODEX/.Xauthority-xephyr"
+CODEX_DISPLAY=":100"
+
+# Create $HOME_CODEX/env.source
+__cdeh_restore_host_environment
+
+#==============================================================================
+# This should become a new service.
+
+# Create netns nscodex (if it doesn't already exist).
+echo "Starting nscodex netns."
+sudo systemctl start netns-nft@nscodex.service
+
+# Exit immediately if any command fails.
+set -e
+
+# End new service.
+#==============================================================================
+
+export HOME_CODEX=/opt/ext4/nvme2/codex
+
+XEPHYR_BASE=$HOME_CODEX/.Xephyr
+mkdir -p $XEPHYR_BASE
+XEPHYR_PIDFILE="$XEPHYR_BASE/pid"
+XEPHYR_COUNTFILE="$XEPHYR_BASE/refcount"
+exec 9>"$XEPHYR_BASE/lock"
+
+function start_xephyr()
+{
+  flock 9
+
+  # Check if Xephyr is already running and pidfile is valid.
+  xephyr_running=false
+  if [ -f "$XEPHYR_PIDFILE" ]; then
+    if read -r pid <"$XEPHYR_PIDFILE" && kill -0 "$pid" 2>/dev/null; then
+      xephyr_running=true
+    else
+      # Stale pidfile.
+      rm -f "$XEPHYR_PIDFILE"
+    fi
+  fi
+
+  if ! $xephyr_running; then
+    # Optional: additionally check for stale X socket if you like:
+    #   [ -S "/tmp/.X11-unix/X${CODEX_DISPLAY#:}" ] && rm -f "/tmp/.X11-unix/X${CODEX_DISPLAY#:}"
+
+    Xephyr "$CODEX_DISPLAY" -screen 1280x800 -br -nolisten tcp -auth "$HOST_XAUTHORITY" 2>/dev/null &
+    sleep 1
+    DISPLAY="$CODEX_DISPLAY" XAUTHORITY="$HOST_XAUTHORITY" fluxbox &
+    xephyr_pid=$!
+    printf '%s\n' "$xephyr_pid" >"$XEPHYR_PIDFILE"
+    printf '1\n' >"$XEPHYR_COUNTFILE"
+  else
+    # Just bump the refcount.
+    local count=0
+    if [ -f "$XEPHYR_COUNTFILE" ]; then
+      read -r count <"$XEPHYR_COUNTFILE" || count=0
+    fi
+    printf '%s\n' "$((count + 1))" >"$XEPHYR_COUNTFILE"
+    echo "Xephyr already running! (refcount now $((count + 1)))."
+  fi
+
+  flock -u 9
+}
+
+function cleanup_xephyr()
+{
+  flock 9
+
+  local count=0
+  if [ -f "$XEPHYR_COUNTFILE" ]; then
+    read -r count <"$XEPHYR_COUNTFILE" || count=0
+  fi
+
+  if [ "$count" -le 1 ]; then
+    # We are the last user (or something went wrong and count was 0).
+    if [ -f "$XEPHYR_PIDFILE" ]; then
+      local pid
+      read -r pid <"$XEPHYR_PIDFILE" || pid=""
+      if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" || true
+      fi
+    fi
+    rm -f "$XEPHYR_PIDFILE" "$XEPHYR_COUNTFILE"
+  else
+    printf '%s\n' "$((count - 1))" >"$XEPHYR_COUNTFILE"
+    echo "NOT Killing Xephyr (refcount now $((count - 1)))."
+  fi
+
+  flock -u 9
+}
+
+function cleanup_nscodex()
+{
+  echo "NOT Removing nscodex netns."
+  # Take down the nscodex netns.
+  # Removing `lo` and/or `veth` also removes `nft`, which depends on it;
+  # `name` is taken down because nobody is using it anymore.
+#  sudo systemctl stop netns-lo@nscodex netns-veth@nscodex
+  cleanup_xephyr
+}
+
+function start_sockettapd()
+{
+  local codex_mode="$1"
+  rm -f "$PROJECTDIR/sockettapd.log"
+  sockettapd --one-shot --projectdir "$PROJECTDIR" --log "$PROJECTDIR/sockettapd.log" --socket "$codex_mode"
+}
+
+# Set trap for cleanup.
+trap cleanup_nscodex EXIT ERR
+
+# We don't have the host X11 from this environment.
+unset XAUTHORITY
+
+# Should be the same as ~/.bashrc.
+export CDEH_ROOT=/opt/cdeh
+
+# Helpers.
+prepend_to_array() {
+    local array_name="$1"
+    shift
+    local -n arr_ref="$array_name"  # nameref (bash 4.3+)
+    arr_ref=("$@" "${arr_ref[@]}")
+}
+
+quote_args() {
+  local quoted_args=()
+  for arg in "$@"; do
+    if [[ "$arg" =~ [[:space:]] ]]; then
+      # Check if we can use single quotes (no single quotes in string).
+      if [[ "$arg" != *"'"* ]]; then
+        quoted_args+=("'$arg'")
+      else
+        # Use double quotes and escape all special chars.
+        arg="${arg//\\/\\\\}"  # Escape backslashes first
+        arg="${arg//\"/\\\"}"  # Escape double quotes
+        arg="${arg//\$/\\\$}"  # Escape dollar
+        arg="${arg//\`/\\\`}"  # Escape backticks
+        # For other chars, we might need to escape them too.
+        quoted_args+=("\"$arg\"")
+      fi
+    else
+      quoted_args+=("$arg")
+    fi
+  done
+  echo "${quoted_args[*]}"
+}
+
+add_ro () {  # Usage: add_ro SRC DST
+  test -e "$1" && set -- "$@" "--ro-bind" "$1" "$1"
+  printf '%s\0' "${@:2}"
+}
+
+# Determine which command to run.
+del_path $HOME/bin      # Do not run the codex script (again).
+CODEX_COMMAND="$(/usr/bin/which codex | sed -e 's%'$CODEX_WORKSPACE'%/opt/ext4/nvme2/codex/workspace%')"
+echo "CODEX_COMMAND = $CODEX_COMMAND"
+# This command is run inside the container. It first generates ~/.codex/AGENTS.md before starting codex.
+COMMAND="$HOME_CODEX/.local/bin/start_codex"
+CODEX_MODE=unknown
+# Create Agent Assisted Planner (AAP) directory.
+mkdir -p $PROJECTDIR/AAP
+for d in planner coder ThreadID; do
+  mkdir -p $PROJECTDIR/AAP/$d
+done
+# Note: this won't work if GITACHE_ROOT, CCACHE_DIR or HOME contain spaces or quotes.
+# Also note that $HOME/.ssh will be mapped onto $HOME_CODEX/.ssh -- it isn't the real HOME.
+roots_json='["/opt/ext4/nvme2/codex/workspace"'
+for p in "${GITACHE_ROOT}" "${CCACHE_DIR}" "${HOME}/.ssh" "${CODEX_EXTRA_WRITABLE_ROOTS[@]}"; do
+  roots_json+=",\"$p\""
+done
+roots_json+="]"
+command_args=(
+  "$CODEX_COMMAND"
+#  "--sandbox" "workspace-write"                                 # `workspace` here refers to the repository - not workspace/.
+  "--sandbox" "danger-full-access"
+  # These options are only OK inside this container:
+  "--ask-for-approval" "never"
+  "--config" "sandbox_workspace_write.network_access=true"
+  "--config" "sandbox_workspace_write.writable_roots=${roots_json}"
+)
+if [ "$#" -eq 1 ] && [ "$1" == "shell" ]; then
+  # Run a bash shell with CODEX_MODE=shell.
+  COMMAND="bash"
+  CODEX_MODE="shell"
+  command_args=("-l")
+elif [ "$#" -ge 1 ] && [ "$1" == "bash" ]; then
+  # Run a bash shell, including any arguments passed.
+  COMMAND="bash"
+  CODEX_MODE="bash"
+  shift
+  command_args=("$@")
+elif [ "$#" -eq 1 ] && [[ $1 == "plan" || $1 == "planner" ]]; then
+  CODEX_MODE="planner"
+elif [ "$#" -eq 2 ] && [ "$1" == "resume" ]; then
+  # Append `resume ...` to the default arguments.
+  CODEX_THREAD_ID="${2}"
+  command_args=("${command_args[@]}" resume "$CODEX_THREAD_ID")
+  local thread_id_dir="$PROJECTDIR/AAP/ThreadID/$CODEX_THREAD_ID"
+  if [[ -d "$thread_id_dir" ]]; then
+    # Figure out the mode.
+    CODEX_MODE=$(<"$PROJECTDIR/AAP/ThreadID/$CODEX_THREAD_ID/mode")
+  else
+    echo -e "\e[31mWARNING: $thread_id_dir DOES NOT EXIST!\e[0m"
+    sleep 2
+  fi
+else
+  CODEX_MODE=coder
+fi
+
+# Build the bwrap argv tail (the --ro-bind pieces).
+ETC_FILES=()
+mapfile -d '' -t ETC_FILES < <(
+  add_ro /etc/passwd
+  add_ro /etc/group
+  add_ro /etc/nsswitch.conf
+  add_ro /etc/hosts
+  add_ro /etc/localtime
+  add_ro /etc/ld.so.cache
+  add_ro /etc/ssl
+  add_ro /etc/ca-certificates
+  add_ro /etc/remountd
+  echo -n
+)
+
+# Recreate the /usr/src/linux symlink in case the kernel version changed since the last run.
+sudo ln -sf "../lib/modules/$(uname -r)/build" "$HOME_CODEX/.bwrap-masks/usr_src_linux/linux"
+
+# Start a pseudo X server. This creates a UNIX socket /tmp/.X11-unix/X100
+start_xephyr
+
+echo -e "Running codex in \e[31m\"$CODEX_MODE\" mode\e[0m."
+
+if [[ $CODEX_MODE == "planner" || $CODEX_MODE == "coder" ]]; then
+  # Start the sockettapd.
+  start_sockettapd "$CODEX_MODE"
+  # Make codex listen on the correct socket.
+  command_args=("${command_args[@]}" --config exec_socket_path="/opt/ext4/nvme2/codex/workspace/AAP/$CODEX_MODE.sock")
+fi
+
+# Switch home directories.
+HOME_USER="$HOME"
+HOME="$HOME_CODEX"
+
+# Set up cdeh; this must be the same as what is used in $HOME_CODEX/.bash_profile
+CODEX_CDEH_ROOT=$HOME/cdeh
+# In case it changed.
+cp $CDEH_ROOT/env.bashrc $CODEX_CDEH_ROOT
+cp $CDEH_ROOT/do_prompt $CODEX_CDEH_ROOT
+
+mode_of ()
+{
+  stat -L -c '%a' -- "$1" 2>/dev/null || echo "755"
+}
+
+create_dirs ()
+{
+  local path="$1"
+  local stop_at="${2:-/}"
+  local -a dirs=()
+  local d=
+
+  while :; do
+    path=$(dirname -- "$path") || return 1
+    [[ "$path" == "$stop_at" ]] && break
+    dirs=("$path" "${dirs[@]}")
+  done
+
+  for d in "${dirs[@]}"; do
+    printf -- '--perms %s --dir %s\n' "$(mode_of "$d")" "$d"
+  done
+}
+
+# The arguments passed to bwrap.
+bwrap_args=(
+  # Mount directories required for the Operating System.
+  --proc /proc
+  --dev /dev
+  $(create_dirs /sys/devices/system/cpu) --ro-bind /sys/devices/system/cpu /sys/devices/system/cpu     # Needed to determine config::cacheline_size_c (utils).
+  --perms $(mode_of /tmp) --tmpfs /tmp
+  --perms 755 --dir /tmp/.X11-unix
+  --ro-bind /tmp/.X11-unix /tmp/.X11-unix
+  --ro-bind /usr /usr
+  --ro-bind /bin /bin
+  --ro-bind /lib /lib
+  --ro-bind-try /lib64 /lib64
+  # Mount an empty /etc with just a resolv.conf and profile.
+  --bind "$HOME_CODEX/.bwrap-masks/etc" /etc                    # We need to use --bind for the next line to work, then remount it ro.
+  # Add remaining /etc files to it.
+  "${ETC_FILES[@]}"
+  --remount-ro /etc
+  $(create_dirs /run/remountd) --bind /run/remountd /run/remountd
+  --bind /run/netns /run/netns
+  # Mount an empty /usr/src with a linux symlink.
+  --bind "$HOME_CODEX/.bwrap-masks/usr_src_linux" /usr/src      # We need to use --bind for the next line to work, then remount it to.
+  # Add a nvim plugin to that that we're symlinking.
+  $(create_dirs /usr/src/pathogen/vim-pathogen/autoload/pathogen.vim /usr/src)
+  --ro-bind "/usr/src/pathogen/vim-pathogen/autoload/pathogen.vim" "/usr/src/pathogen/vim-pathogen/autoload/pathogen.vim"
+  --remount-ro /usr/src
+  # Mount the home directory; Codex should never write here, therefore it is remounted ro below.
+  $(create_dirs "$HOME_CODEX") --bind "$HOME_CODEX" "$HOME_CODEX"
+  # ssh doesn't use HOME, so we have to add HOME_USER to the container. Use --bind so we can add to /home/carlo/.ssh/known_hosts from the shell. Other files are owned by root.
+  $(create_dirs "$HOME_USER/.ssh") --bind "$HOME_CODEX/.ssh" "$HOME_USER/.ssh"
+  # Add individual directories from our home directory.
+  $(create_dirs "$HOME_CODEX/.config/nvim" "$HOME_CODEX") --ro-bind "$HOME_USER/.config/nvim" "$HOME_CODEX/.config/nvim"
+  $(create_dirs "$HOME_USER/projects/github/neovim-true-color-scheme-editor" "$HOME_USER")
+  --ro-bind "$HOME_USER/projects/github/neovim-true-color-scheme-editor" "$HOME_USER/projects/github/neovim-true-color-scheme-editor"
+  --ro-bind "$HOST_XAUTHORITY" "$CODEX_XAUTHORITY"
+  --bind "$HOME_USER/.codex" "$HOME_CODEX/.codex"
+  # OpenAI Codex CAN write to the following directories (see writable_roots):
+  --bind "$CODEX_WORKSPACE" "$HOME_CODEX/workspace"
+  # Remount $HOME_CODEX read-only, now that all bind mounts have been added to it.
+  --remount-ro "$HOME_CODEX"
+  # Codex needs write access to the gitache root.
+  --bind "$GITACHE_ROOT" "$GITACHE_ROOT"
+  --perms $(mode_of /tmp) --tmpfs "$CCACHE_DIR"
+  # Change directory to the repository (Codex automatically has write access here because of --sandbox workspace-write).
+  --chdir "$HOME_CODEX/workspace/$CODEX_REPOBASE/$CODEX_DIRECTORY"
+)
+
+echo "Starting bwrap, command:"
+echo "sudo --preserve-env=HOME,CODEX_REPOBASE,CODEX_MODE \\"
+echo "  ip netns exec nscodex \\"
+echo "    bwrap $(quote_args "${bwrap_args[@]}") \\"
+echo "      -- \\"
+echo "      setpriv --reuid 1000 --regid 1000 --groups 1000,remountd \\"
+echo "        $COMMAND $(quote_args "${command_args[@]}")"
+
+sudo --preserve-env=HOME,CODEX_REPOBASE,CODEX_MODE \
+  ip netns exec nscodex \
+    bwrap "${bwrap_args[@]}" \
+      -- \
+      setpriv --reuid 1000 --regid 1000 --groups 1000,remountd \
+        "$COMMAND" "${command_args[@]}"
