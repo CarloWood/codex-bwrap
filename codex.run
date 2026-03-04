@@ -238,45 +238,22 @@ CODEX_COMMAND="$(/usr/bin/which codex | sed -e 's%'$CODEX_WORKSPACE'%/opt/ext4/n
 echo "CODEX_COMMAND = $CODEX_COMMAND"
 # This command is run inside the container. It first generates ~/.codex/AGENTS.md before starting codex.
 COMMAND="$HOME_CODEX/.local/bin/start_codex"
+# Determine CODEX_MODE.
 CODEX_MODE=unknown
-# Create Agent Assisted Planner (AAP) directory.
-mkdir -p $PROJECTDIR/AAP
-for d in planner coder ThreadID; do
-  mkdir -p $PROJECTDIR/AAP/$d
-done
-# Note: this won't work if GITACHE_ROOT, CCACHE_DIR or HOME contain spaces or quotes.
-# Also note that $HOME/.ssh will be mapped onto $HOME_CODEX/.ssh -- it isn't the real HOME.
-roots_json='["/opt/ext4/nvme2/codex/workspace"'
-for p in "${GITACHE_ROOT}" "${CCACHE_DIR}" "${HOME}/.ssh" "${CODEX_EXTRA_WRITABLE_ROOTS[@]}"; do
-  roots_json+=",\"$p\""
-done
-roots_json+="]"
-command_args=(
-  "$CODEX_COMMAND"
-#  "--sandbox" "workspace-write"                                 # `workspace` here refers to the repository - not workspace/.
-  "--sandbox" "danger-full-access"
-  # These options are only OK inside this container:
-  "--ask-for-approval" "never"
-  "--config" "sandbox_workspace_write.network_access=true"
-  "--config" "sandbox_workspace_write.writable_roots=${roots_json}"
-)
 if [ "$#" -eq 1 ] && [ "$1" == "shell" ]; then
   # Run a bash shell with CODEX_MODE=shell.
   COMMAND="bash"
   CODEX_MODE="shell"
-  command_args=("-l")
 elif [ "$#" -ge 1 ] && [ "$1" == "bash" ]; then
   # Run a bash shell, including any arguments passed.
   COMMAND="bash"
   CODEX_MODE="bash"
   shift
-  command_args=("$@")
 elif [ "$#" -eq 1 ] && [[ $1 == "plan" || $1 == "planner" ]]; then
   CODEX_MODE="planner"
 elif [ "$#" -eq 2 ] && [ "$1" == "resume" ]; then
   # Append `resume ...` to the default arguments.
   CODEX_THREAD_ID="${2}"
-  command_args+=(resume "$CODEX_THREAD_ID")
   local thread_id_dir="$PROJECTDIR/AAP/ThreadID/$CODEX_THREAD_ID"
   if [[ -d "$thread_id_dir" ]]; then
     # Figure out the mode.
@@ -287,6 +264,44 @@ elif [ "$#" -eq 2 ] && [ "$1" == "resume" ]; then
   fi
 else
   CODEX_MODE=coder
+fi
+
+# Create Agent Assisted Planner (AAP) directory.
+mkdir -p $PROJECTDIR/AAP
+for d in planner coder ThreadID; do
+  mkdir -p $PROJECTDIR/AAP/$d
+done
+
+# Construct roots_json.
+if [[ $CODEX_MODE == "planner" ]]; then
+  roots_json='["/opt/ext4/nvme2/codex/workspace/AAP"'
+else
+  roots_json='["/opt/ext4/nvme2/codex/workspace"'
+fi
+# Note: this won't work if GITACHE_ROOT, CCACHE_DIR or HOME contain spaces or quotes.
+# Also note that $HOME/.ssh will be mapped onto $HOME_CODEX/.ssh -- it isn't the real HOME.
+for p in "${GITACHE_ROOT}" "${CCACHE_DIR}" "${HOME}/.ssh" "${CODEX_EXTRA_WRITABLE_ROOTS[@]}"; do
+  roots_json+=",\"$p\""
+done
+roots_json+="]"
+
+# Construct command_args.
+command_args=(
+  "$CODEX_COMMAND"
+#  "--sandbox" "workspace-write"                                 # `workspace` here refers to the repository - not workspace/.
+  "--sandbox" "danger-full-access"
+  # These options are only OK inside this container:
+  "--ask-for-approval" "never"
+  "--config" "sandbox_workspace_write.network_access=true"
+  "--config" "sandbox_workspace_write.writable_roots=${roots_json}"
+)
+if [[ $CODEX_MODE == "shell" ]]; then
+  command_args=("-l")
+elif [[ $CODEX_MODE == "bash" ]]; then
+  shift
+  command_args=("$@")
+elif [ "$#" -eq 2 ] && [ "$1" == "resume" ]; then
+  command_args+=(resume "$CODEX_THREAD_ID")
 fi
 
 # Build the bwrap argv tail (the --ro-bind pieces).
@@ -397,10 +412,21 @@ bwrap_args=(
   --perms $(mode_of /tmp) --tmpfs "$CCACHE_DIR"
 )
 
-bwrap_args+=(
-  # Change directory to the repository (Codex automatically has write access here because of --sandbox workspace-write).
-  --chdir "$HOME_CODEX/workspace/$CODEX_REPOBASE/$CODEX_DIRECTORY"
-)
+if [[ $CODEX_MODE == "planner" ]]; then
+  bwrap_args+=(
+    # OpenAI Codex CAN write to the following directories (see writable_roots):
+    --bind "$CODEX_WORKSPACE/AAP" "$HOME_CODEX/workspace/AAP"
+    # Remount $CODEX_WORKSPACE read-only, now that all bind mounts have been added to it.
+    --remount-ro "$HOME_CODEX/workspace"
+    # Change directory to the repository (Codex automatically has write access here because of --sandbox workspace-write).
+    --chdir "$HOME_CODEX/workspace/AAP"
+  )
+else
+  bwrap_args+=(
+    # Change directory to the repository (Codex automatically has write access here because of --sandbox workspace-write).
+    --chdir "$HOME_CODEX/workspace/$CODEX_REPOBASE/$CODEX_DIRECTORY"
+  )
+fi
 
 export CODEX_MODE
 
