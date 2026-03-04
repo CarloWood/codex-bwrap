@@ -97,7 +97,7 @@ export CCACHE_DIR="/opt/ccache"
 export GITACHE_ROOT="/opt/gitache"
 
 # Load Codex environment.
-[ -f "$HOME/projects/env.codex" ] && source "$HOME/projects/github/codex/env.codex"
+[ -f "$HOME/projects/github/codex/env.codex" ] && source "$HOME/projects/github/codex/env.codex"
 
 function project_environment {
   if [[ -z "$PROJECTDIR" ]]; then

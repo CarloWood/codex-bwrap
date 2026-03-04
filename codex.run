@@ -276,7 +276,7 @@ elif [ "$#" -eq 1 ] && [[ $1 == "plan" || $1 == "planner" ]]; then
 elif [ "$#" -eq 2 ] && [ "$1" == "resume" ]; then
   # Append `resume ...` to the default arguments.
   CODEX_THREAD_ID="${2}"
-  command_args=("${command_args[@]}" resume "$CODEX_THREAD_ID")
+  command_args+=(resume "$CODEX_THREAD_ID")
   local thread_id_dir="$PROJECTDIR/AAP/ThreadID/$CODEX_THREAD_ID"
   if [[ -d "$thread_id_dir" ]]; then
     # Figure out the mode.
@@ -316,7 +316,7 @@ if [[ $CODEX_MODE == "planner" || $CODEX_MODE == "coder" ]]; then
   # Start the sockettapd.
   start_sockettapd "$CODEX_MODE"
   # Make codex listen on the correct socket.
-  command_args=("${command_args[@]}" --config exec_socket_path="/opt/ext4/nvme2/codex/workspace/AAP/$CODEX_MODE.sock")
+  command_args+=(--config exec_socket_path="/opt/ext4/nvme2/codex/workspace/AAP/$CODEX_MODE.sock")
 fi
 
 # Switch home directories.
@@ -395,9 +395,14 @@ bwrap_args=(
   # Codex needs write access to the gitache root.
   --bind "$GITACHE_ROOT" "$GITACHE_ROOT"
   --perms $(mode_of /tmp) --tmpfs "$CCACHE_DIR"
+)
+
+bwrap_args+=(
   # Change directory to the repository (Codex automatically has write access here because of --sandbox workspace-write).
   --chdir "$HOME_CODEX/workspace/$CODEX_REPOBASE/$CODEX_DIRECTORY"
 )
+
+export CODEX_MODE
 
 echo "Starting bwrap, command:"
 echo "sudo --preserve-env=HOME,CODEX_REPOBASE,CODEX_MODE \\"
